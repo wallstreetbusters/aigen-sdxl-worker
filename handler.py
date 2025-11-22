@@ -111,79 +111,83 @@ def handler(job):
     # --------------------------
     # GENERATE
     # --------------------------
-    if task != "generate":
-        return {"error": f"Unsupported task: {task}"}
-
-    prompt = data.get("prompt", "a photo of a woman, studio portrait, 4k")
-    negative_prompt = data.get(
-        "negative_prompt",
-        "extra limbs, extra fingers, bad anatomy, deformed, blurry, low quality"
-    )
-
-    num_outputs = int(data.get("num_outputs", 1))
-    width = int(data.get("width", 1024))
-    height = int(data.get("height", 1024))
-    steps = int(data.get("steps", 30))
-    cfg_scale = float(data.get("cfg_scale", 7.0))
-    seed = data.get("seed", None)
-    lora_url = data.get("lora_url")
-
-    generator = None
-    if seed is not None:
-        generator = torch.Generator(device=DEVICE).manual_seed(int(seed))
-
-    pipe = load_pipeline()
-
-    # Optional LoRA loading
-    unload_after = False
-    if lora_url:
-        try:
-            resp = requests.get(lora_url)
-            resp.raise_for_status()
-            lora_path = "/tmp/avatar_lora.safetensors"
-            with open(lora_path, "wb") as f:
-                f.write(resp.content)
-
-            pipe.load_lora_weights(lora_path)
-            unload_after = True
-            print(f"[lora] Loaded LoRA from {lora_url}")
-        except Exception as e:
-            print(f"[lora] Failed to load LoRA from {lora_url}: {e}")
-
-    with torch.autocast("cuda"):
-        result = pipe(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            num_inference_steps=steps,
-            guidance_scale=cfg_scale,
-            width=width,
-            height=height,
-            num_images_per_prompt=num_outputs,
-            generator=generator,
+    elif task == "generate":
+        prompt = data.get("prompt", "a photo of a woman, studio portrait, 4k")
+        negative_prompt = data.get(
+            "negative_prompt",
+            "extra limbs, extra fingers, bad anatomy, deformed, blurry, low quality"
         )
 
-    images = result.images
+        num_outputs = int(data.get("num_outputs", 1))
+        width = int(data.get("width", 1024))
+        height = int(data.get("height", 1024))
+        steps = int(data.get("steps", 30))
+        cfg_scale = float(data.get("cfg_scale", 7.0))
+        seed = data.get("seed", None)
+        lora_url = data.get("lora_url")
 
-    encoded = [
-        {
-            "index": i,
-            "format": "png",
-            "base64": image_to_base64(img, "PNG"),
+        generator = None
+        if seed is not None:
+            generator = torch.Generator(device=DEVICE).manual_seed(int(seed))
+
+        pipe = load_pipeline()
+
+        # Optional LoRA loading
+        unload_after = False
+        if lora_url:
+            try:
+                resp = requests.get(lora_url)
+                resp.raise_for_status()
+                lora_path = "/tmp/avatar_lora.safetensors"
+                with open(lora_path, "wb") as f:
+                    f.write(resp.content)
+
+                pipe.load_lora_weights(lora_path)
+                unload_after = True
+                print(f"[lora] Loaded LoRA from {lora_url}")
+            except Exception as e:
+                print(f"[lora] Failed to load LoRA from {lora_url}: {e}")
+
+        with torch.autocast("cuda"):
+            result = pipe(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                num_inference_steps=steps,
+                guidance_scale=cfg_scale,
+                width=width,
+                height=height,
+                num_images_per_prompt=num_outputs,
+                generator=generator,
+            )
+
+        images = result.images
+
+        encoded = [
+            {
+                "index": i,
+                "format": "png",
+                "base64": image_to_base64(img, "PNG"),
+            }
+            for i, img in enumerate(images)
+        ]
+
+        if unload_after:
+            try:
+                pipe.unload_lora_weights()
+            except Exception:
+                pass
+
+        return {
+            "status": "ok",
+            "engine": "sdxl",
+            "images": encoded,
         }
-        for i, img in enumerate(images)
-    ]
 
-    if unload_after:
-        try:
-            pipe.unload_lora_weights()
-        except Exception:
-            pass
-
-    return {
-        "status": "ok",
-        "engine": "sdxl",
-        "images": encoded,
-    }
+    # --------------------------
+    # UNKNOWN TASK
+    # --------------------------
+    else:
+        return {"error": f"Unsupported task: {task}"}
 
 
 runpod.serverless.start({"handler": handler})
