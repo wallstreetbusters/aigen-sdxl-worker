@@ -220,21 +220,23 @@ def train_lora_sdxl(
     if hasattr(pipe, "text_encoder_2"):
         pipe.text_encoder_2.requires_grad_(False)
 
-    # 4) Attach LoRA to UNet
-    # Guard against None peft_config / active_adapters causing "NoneType not iterable"
+    # 4) Attach LoRA to UNet (once per process)
+    adapter_name = "default"
+
     if getattr(unet, "peft_config", None) is None:
         unet.peft_config = {}
-    if getattr(unet, "active_adapters", None) is None:
-        unet.active_adapters = []
 
-    unet_lora_config = LoraConfig(
-        r=8,
-        lora_alpha=8,
-        init_lora_weights="gaussian",
-        target_modules=["to_k", "to_q", "to_v", "to_out.0"],
-    )
-    print("[train] Adding LoRA adapter to UNet")
-    unet.add_adapter(unet_lora_config, "default")
+    if adapter_name in unet.peft_config:
+        print(f"[train] LoRA adapter '{adapter_name}' already exists, reusing it.")
+    else:
+        unet_lora_config = LoraConfig(
+            r=8,
+            lora_alpha=8,
+            init_lora_weights="gaussian",
+            target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+        )
+        print(f"[train] Adding LoRA adapter '{adapter_name}' to UNet")
+        unet.add_adapter(unet_lora_config, adapter_name)
 
     # Only LoRA params will have requires_grad=True
     lora_params = [p for p in unet.parameters() if p.requires_grad]
@@ -302,12 +304,31 @@ def train_lora_sdxl(
                     dtype=torch.float16,
                 )
 
+            # Build added_cond_kwargs for SDXL (avoid NoneType error)
+            hidden_size = getattr(unet.config, "cross_attention_dim", encoder_hidden_states.shape[-1])
+            text_embeds = torch.zeros(
+                (latents.shape[0], hidden_size),
+                device=DEVICE,
+                dtype=torch.float16,
+            )
+            # SDXL usually uses 6 floats here (orig size, crop, target size); zeros are fine for training
+            time_ids = torch.zeros(
+                (latents.shape[0], 6),
+                device=DEVICE,
+                dtype=torch.float16,
+            )
+            added_cond_kwargs = {
+                "text_embeds": text_embeds,
+                "time_ids": time_ids,
+            }
+
             # 6) Forward UNet
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == "cuda")):
                 model_pred = unet(
                     noisy_latents,
                     timesteps,
                     encoder_hidden_states=encoder_hidden_states,
+                    added_cond_kwargs=added_cond_kwargs,
                 ).sample
 
                 loss = torch.nn.functional.mse_loss(model_pred, noise)
@@ -333,7 +354,7 @@ def train_lora_sdxl(
     tmp_out_dir.mkdir(parents=True, exist_ok=True)
 
     # Uses diffusers' built-in LoRA saving
-    pipe.save_lora_weights(tmp_out_dir.as_posix(), adapter_name="default")
+    pipe.save_lora_weights(tmp_out_dir.as_posix(), adapter_name=adapter_name)
 
     # Look for a safetensors file
     lora_file = None
