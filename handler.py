@@ -5,7 +5,7 @@ import zipfile
 import shutil
 from pathlib import Path
 from typing import List
-import traceback  # <--- add this
+import traceback  # for logging errors
 
 import numpy as np
 import requests
@@ -15,7 +15,6 @@ from torch.utils.data import Dataset, DataLoader
 from diffusers import StableDiffusionXLPipeline, DDPMScheduler
 from peft import LoraConfig
 from PIL import Image
-
 
 # ------------------------------
 # Model setup
@@ -222,6 +221,12 @@ def train_lora_sdxl(
         pipe.text_encoder_2.requires_grad_(False)
 
     # 4) Attach LoRA to UNet
+    # Guard against None peft_config / active_adapters causing "NoneType not iterable"
+    if getattr(unet, "peft_config", None) is None:
+        unet.peft_config = {}
+    if getattr(unet, "active_adapters", None) is None:
+        unet.active_adapters = []
+
     unet_lora_config = LoraConfig(
         r=8,
         lora_alpha=8,
@@ -432,8 +437,7 @@ def handler(job):
                 "local_lora_path": str(local_lora_path),
                 "upload_status": upload_status,
             }
-           except Exception as e:
-            # Print full traceback to RunPod logs so we can see exactly where it fails
+        except Exception as e:
             print("[train] ERROR in train-lora:")
             traceback.print_exc()
             return {
@@ -444,7 +448,6 @@ def handler(job):
                 "avatar_id": avatar_id,
                 "zip_url": zip_url,
             }
-
 
     # --------------------------
     # GENERATE
