@@ -16,7 +16,7 @@ from peft import LoraConfig
 from PIL import Image
 
 # ------------------------------
-# Model setup
+# Model setup 
 # ------------------------------
 
 MODEL_ID = os.getenv("MODEL_ID", "stabilityai/stable-diffusion-xl-base-1.0")
