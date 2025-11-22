@@ -1,9 +1,8 @@
-import requests
-
 import os
 import io
 import base64
 
+import requests
 import runpod
 import torch
 from diffusers import StableDiffusionXLPipeline
@@ -13,7 +12,6 @@ from PIL import Image
 # Model setup
 # ------------------------------
 
-# You can override this in RunPod env vars later if you want a different SDXL model
 MODEL_ID = os.getenv("MODEL_ID", "stabilityai/stable-diffusion-xl-base-1.0")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -32,7 +30,6 @@ def load_pipeline():
         torch_dtype=torch.float16
     ).to(DEVICE)
 
-    # If xformers is available, this saves VRAM
     try:
         PIPELINE.enable_xformers_memory_efficient_attention()
     except Exception:
@@ -42,7 +39,6 @@ def load_pipeline():
 
 
 def image_to_base64(img: Image.Image, fmt: str = "PNG") -> str:
-    """Encode a PIL image as base64 string."""
     buf = io.BytesIO()
     img.save(buf, format=fmt)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -54,10 +50,7 @@ def image_to_base64(img: Image.Image, fmt: str = "PNG") -> str:
 
 def handler(job):
     """
-    RunPod serverless handler.
-
-    Expected input format (job['input']):
-
+    Expected job['input']:
     {
       "task": "generate",
       "engine": "sdxl",
@@ -68,7 +61,8 @@ def handler(job):
       "height": 1024,
       "steps": 30,
       "cfg_scale": 7,
-      "seed": 12345
+      "seed": 12345,
+      "lora_url": "https://..."  # optional
     }
     """
     data = job.get("input", {}) or {}
@@ -89,8 +83,7 @@ def handler(job):
     steps = int(data.get("steps", 30))
     cfg_scale = float(data.get("cfg_scale", 7.0))
     seed = data.get("seed", None)
-    lora_url = data.get("lora_url")  # URL to a .safetensors LoRA file (R2 later)
-
+    lora_url = data.get("lora_url")
 
     generator = None
     if seed is not None:
@@ -98,24 +91,23 @@ def handler(job):
 
     pipe = load_pipeline()
 
-    # Optionally load a LoRA for avatar generation
-unload_after = False
-if lora_url:
-    try:
-        # Download LoRA file from URL to a temp path
-        resp = requests.get(lora_url)
-        resp.raise_for_status()
-        lora_path = "/tmp/avatar_lora.safetensors"
-        with open(lora_path, "wb") as f:
-            f.write(resp.content)
+    # --------------------------
+    # Optional LoRA loading
+    # --------------------------
+    unload_after = False
+    if lora_url:
+        try:
+            resp = requests.get(lora_url)
+            resp.raise_for_status()
+            lora_path = "/tmp/avatar_lora.safetensors"
+            with open(lora_path, "wb") as f:
+                f.write(resp.content)
 
-        # Load LoRA weights into the pipeline
-        pipe.load_lora_weights(lora_path)
-        unload_after = True
-        print(f"[lora] Loaded LoRA from {lora_url}")
-    except Exception as e:
-        print(f"[lora] Failed to load LoRA from {lora_url}: {e}")
-
+            pipe.load_lora_weights(lora_path)
+            unload_after = True
+            print(f"[lora] Loaded LoRA from {lora_url}")
+        except Exception as e:
+            print(f"[lora] Failed to load LoRA from {lora_url}: {e}")
 
     with torch.autocast("cuda"):
         result = pipe(
@@ -139,7 +131,7 @@ if lora_url:
         }
         for i, img in enumerate(images)
     ]
-    
+
     if unload_after:
         try:
             pipe.unload_lora_weights()
@@ -153,5 +145,4 @@ if lora_url:
     }
 
 
-# Required by RunPod
 runpod.serverless.start({"handler": handler})
