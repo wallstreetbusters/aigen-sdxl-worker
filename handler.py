@@ -1,6 +1,9 @@
 import os
 import io
 import base64
+import zipfile
+import shutil
+from pathlib import Path
 
 import requests
 import runpod
@@ -45,6 +48,49 @@ def image_to_base64(img: Image.Image, fmt: str = "PNG") -> str:
 
 
 # ------------------------------
+# Dataset helpers for train-lora
+# ------------------------------
+
+def prepare_dataset(zip_url: str, avatar_id: str | None = None):
+    """
+    Download the dataset ZIP from zip_url and extract it under /tmp.
+    Returns (dataset_dir, image_files).
+    """
+    if not zip_url:
+        raise ValueError("zip_url is required")
+
+    suffix = avatar_id or "default"
+    base_dir = Path(f"/tmp/dataset_{suffix}")
+
+    # Clean old dir if it exists
+    if base_dir.exists():
+        shutil.rmtree(base_dir)
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    zip_path = base_dir / "dataset.zip"
+
+    print(f"[train] Downloading dataset from {zip_url}")
+    with requests.get(zip_url, stream=True) as resp:
+        resp.raise_for_status()
+        with open(zip_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+
+    print(f"[train] Extracting dataset to {base_dir}")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(base_dir)
+
+    # Collect image files
+    exts = {".jpg", ".jpeg", ".png", ".webp"}
+    image_files = [p for p in base_dir.rglob("*") if p.suffix.lower() in exts]
+
+    print(f"[train] Found {len(image_files)} image files")
+
+    return base_dir, image_files
+
+
+# ------------------------------
 # RunPod handler
 # ------------------------------
 
@@ -67,7 +113,7 @@ def handler(job):
       "lora_url": "https://..."   # optional
     }
 
-    2) Train LoRA (stub for now):
+    2) Train LoRA (dataset stage for now):
     {
       "task": "train-lora",
       "engine": "sdxl",
@@ -84,7 +130,7 @@ def handler(job):
     task = data.get("task", "generate")
 
     # --------------------------
-    # TRAIN LORA (stub)
+    # TRAIN LORA (dataset stage)
     # --------------------------
     if task == "train-lora":
         user_id = data.get("user_id")
@@ -95,18 +141,31 @@ def handler(job):
         lora_upload_url = data.get("lora_upload_url")
         lora_public_url = data.get("lora_public_url")
 
-        # For now we just echo back so we can test the wiring.
-        return {
-            "status": "not_implemented_yet",
-            "engine": "sdxl",
-            "user_id": user_id,
-            "avatar_id": avatar_id,
-            "zip_url": zip_url,
-            "trigger_word": trigger_word,
-            "steps": steps,
-            "lora_upload_url": lora_upload_url,
-            "lora_public_url": lora_public_url,
-        }
+        try:
+            dataset_dir, image_files = prepare_dataset(zip_url, avatar_id)
+            return {
+                "status": "dataset_ready",
+                "engine": "sdxl",
+                "user_id": user_id,
+                "avatar_id": avatar_id,
+                "zip_url": zip_url,
+                "trigger_word": trigger_word,
+                "steps": steps,
+                "lora_upload_url": lora_upload_url,
+                "lora_public_url": lora_public_url,
+                "dataset_dir": str(dataset_dir),
+                "num_images": len(image_files),
+            }
+        except Exception as e:
+            # If zip_url is fake (like example.com) or download fails, we land here
+            return {
+                "status": "error_downloading_dataset",
+                "error_message": str(e),
+                "engine": "sdxl",
+                "user_id": user_id,
+                "avatar_id": avatar_id,
+                "zip_url": zip_url,
+            }
 
     # --------------------------
     # GENERATE
