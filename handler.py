@@ -16,7 +16,7 @@ from peft import LoraConfig
 from PIL import Image
 
 # ------------------------------
-# Model setup 
+# Model setup
 # ------------------------------
 
 MODEL_ID = os.getenv("MODEL_ID", "stabilityai/stable-diffusion-xl-base-1.0")
@@ -199,6 +199,7 @@ def train_lora_sdxl(
     print(f"[train] Steps: {steps}")
 
     # 2) Prepare dataset & dataloader
+    print("[train] Building dataset and dataloader")
     dataset = AvatarDataset(image_files=image_files, caption=caption, resolution=768)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
@@ -240,6 +241,7 @@ def train_lora_sdxl(
 
     noise_scheduler = scheduler
 
+    print("[train] Entering training loop")
     while global_step < steps:
         for batch in dataloader:
             if global_step >= steps:
@@ -264,28 +266,37 @@ def train_lora_sdxl(
 
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-            # Get text embeddings (simplified: first text encoder)
-            if hasattr(pipe, "tokenizer") and hasattr(pipe, "text_encoder"):
-                tokenized = pipe.tokenizer(
-                    batch["caption"],
-                    padding="max_length",
-                    truncation=True,
-                    max_length=pipe.tokenizer.model_max_length,
-                    return_tensors="pt",
-                )
-                input_ids = tokenized.input_ids.to(DEVICE)
-                with torch.no_grad():
-                    encoder_hidden_states = pipe.text_encoder(input_ids)[0]
-            else:
-                # Fallback: no text encoder, use zeros (won't be great, but avoids crashes)
+            # Get text embeddings (safe: fall back to zeros if anything breaks)
+            try:
+                if (
+                    hasattr(pipe, "tokenizer")
+                    and hasattr(pipe, "text_encoder")
+                    and pipe.tokenizer is not None
+                    and pipe.text_encoder is not None
+                ):
+                    tokenized = pipe.tokenizer(
+                        batch["caption"],
+                        padding="max_length",
+                        truncation=True,
+                        max_length=pipe.tokenizer.model_max_length,
+                        return_tensors="pt",
+                    )
+                    input_ids = tokenized.input_ids.to(DEVICE)
+                    with torch.no_grad():
+                        encoder_hidden_states = pipe.text_encoder(input_ids)[0]
+                else:
+                    raise ValueError("No valid text encoder/tokenizer available")
+            except Exception as te:
+                print(f"[train] Text encoder fallback used due to: {te}")
+                hidden_size = getattr(unet.config, "cross_attention_dim", 2048)
                 encoder_hidden_states = torch.zeros(
-                    (latents.shape[0], 77, 2048),
+                    (latents.shape[0], 77, hidden_size),
                     device=DEVICE,
                     dtype=torch.float16,
                 )
 
             # 6) Forward UNet
-            with torch.autocast("cuda", enabled=(DEVICE == "cuda")):
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == "cuda")):
                 model_pred = unet(
                     noisy_latents,
                     timesteps,
@@ -421,7 +432,7 @@ def handler(job):
             }
         except Exception as e:
             return {
-                "status": "error_training_stub",
+                "status": "error_training_sdxl",
                 "error_message": str(e),
                 "engine": "sdxl",
                 "user_id": user_id,
@@ -469,7 +480,7 @@ def handler(job):
             except Exception as e:
                 print(f"[lora] Failed to load LoRA from {lora_url}: {e}")
 
-        with torch.autocast("cuda", enabled=(DEVICE == "cuda")):
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == "cuda")):
             result = pipe(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
