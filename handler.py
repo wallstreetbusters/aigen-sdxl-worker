@@ -5,6 +5,7 @@ import zipfile
 import shutil
 from pathlib import Path
 from typing import List
+import traceback  # <--- add this
 
 import numpy as np
 import requests
@@ -14,6 +15,7 @@ from torch.utils.data import Dataset, DataLoader
 from diffusers import StableDiffusionXLPipeline, DDPMScheduler
 from peft import LoraConfig
 from PIL import Image
+
 
 # ------------------------------
 # Model setup
@@ -430,7 +432,10 @@ def handler(job):
                 "local_lora_path": str(local_lora_path),
                 "upload_status": upload_status,
             }
-        except Exception as e:
+           except Exception as e:
+            # Print full traceback to RunPod logs so we can see exactly where it fails
+            print("[train] ERROR in train-lora:")
+            traceback.print_exc()
             return {
                 "status": "error_training_sdxl",
                 "error_message": str(e),
@@ -439,6 +444,7 @@ def handler(job):
                 "avatar_id": avatar_id,
                 "zip_url": zip_url,
             }
+
 
     # --------------------------
     # GENERATE
