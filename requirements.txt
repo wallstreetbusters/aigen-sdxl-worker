@@ -6,3 +6,4 @@ safetensors==0.4.3
 Pillow==10.3.0
 numpy==1.26.4
 huggingface_hub==0.25.2
+requests==2.31.0
