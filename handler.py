@@ -230,13 +230,13 @@ def train_lora_sdxl(
         )
         print("[train] Got prompt & pooled embeddings from encode_prompt")
 
-add_time_ids = pipe._get_add_time_ids(
-    (height, width),
-    (0, 0),
-    (height, width),
-    dtype=prompt_embeds.dtype,
-)
-print("[train] Got time ids from _get_add_time_ids")
+        add_time_ids = pipe._get_add_time_ids(
+            (height, width),
+            (0, 0),
+            (height, width),
+            dtype=prompt_embeds.dtype,
+        )
+        print("[train] Got time ids from _get_add_time_ids")
 
     except Exception as e:
         print(f"[train] FATAL: encode_prompt/_get_add_time_ids failed: {e}")
