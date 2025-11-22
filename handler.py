@@ -96,11 +96,6 @@ def handler(job):
         lora_public_url = data.get("lora_public_url")
 
         # For now we just echo back so we can test the wiring.
-        # Later we will actually:
-        #  - download zip_url
-        #  - train LoRA
-        #  - upload .safetensors to lora_upload_url
-        #  - return lora_public_url
         return {
             "status": "not_implemented_yet",
             "engine": "sdxl",
