@@ -17,7 +17,7 @@ from peft import LoraConfig
 from PIL import Image
 
 # ------------------------------
-# Model setup 
+# Model setup
 # ------------------------------
 
 MODEL_ID = os.getenv("MODEL_ID", "stabilityai/stable-diffusion-xl-base-1.0")
@@ -179,7 +179,7 @@ def train_lora_sdxl(
     trigger_word: str | None = None,
 ) -> Path:
     """
-    Simplified SDXL LoRA training loop.
+    Simplified SDXL LoRA training loop using pipeline helpers.
 
     - Uses SDXL base model from MODEL_ID.
     - Adds LoRA adapters to the UNet.
@@ -204,7 +204,7 @@ def train_lora_sdxl(
     dataset = AvatarDataset(image_files=image_files, caption=caption, resolution=768)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
 
-    # 3) Load SDXL pipeline and set up training components
+    # 3) Load SDXL pipeline and components
     pipe = load_pipeline()
     pipe.to(DEVICE)
 
@@ -212,7 +212,42 @@ def train_lora_sdxl(
     vae = pipe.vae
     scheduler = DDPMScheduler.from_pretrained(MODEL_ID, subfolder="scheduler")
 
-    # Freeze everything except LoRA params
+    height = width = dataset.resolution
+
+    # 4) Get text + pooled embeddings and time ids via SDXL helpers
+    try:
+        # SDXL encode_prompt returns 4 values
+        (
+            prompt_embeds,
+            _neg_prompt_embeds,
+            pooled_embeds,
+            _neg_pooled,
+        ) = pipe.encode_prompt(
+            caption,
+            device=DEVICE,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=False,
+        )
+        print("[train] Got prompt & pooled embeddings from encode_prompt")
+
+        add_time_ids = pipe._get_add_time_ids(
+            (height, width),
+            (0, 0),
+            (height, width),
+            dtype=prompt_embeds.dtype,
+            device=DEVICE,
+            num_images_per_prompt=1,
+        )
+        print("[train] Got time ids from _get_add_time_ids")
+    except Exception as e:
+        print(f"[train] FATAL: encode_prompt/_get_add_time_ids failed: {e}")
+        raise
+
+    prompt_embeds = prompt_embeds.to(DEVICE)
+    pooled_embeds = pooled_embeds.to(DEVICE)
+    add_time_ids = add_time_ids.to(DEVICE)
+
+    # 5) Freeze everything except LoRA params
     unet.requires_grad_(False)
     vae.requires_grad_(False)
     if hasattr(pipe, "text_encoder"):
@@ -220,7 +255,7 @@ def train_lora_sdxl(
     if hasattr(pipe, "text_encoder_2"):
         pipe.text_encoder_2.requires_grad_(False)
 
-    # 4) Attach LoRA to UNet (once per process)
+    # 6) Attach LoRA to UNet (once per process)
     adapter_name = "default"
 
     if getattr(unet, "peft_config", None) is None:
@@ -244,25 +279,7 @@ def train_lora_sdxl(
 
     optimizer = torch.optim.AdamW(lora_params, lr=1e-4)
 
-    # 5) Pre-compute SDXL text embeddings using pipeline helpers
-    prompt_embeds = None
-    pooled_embeds = None
-    try:
-        if hasattr(pipe, "encode_prompt"):
-            # encode_prompt returns (prompt_embeds, pooled_prompt_embeds) for SDXL
-            prompt_embeds, pooled_embeds = pipe.encode_prompt(
-                caption,
-                device=DEVICE,
-                num_images_per_prompt=1,
-                do_classifier_free_guidance=False,
-            )
-            print("[train] Got prompt embeddings from encode_prompt")
-    except Exception as e:
-        print(f"[train] encode_prompt failed, will fall back to manual text encoder: {e}")
-        prompt_embeds = None
-        pooled_embeds = None
-
-    # 6) Basic training loop
+    # 7) Training loop
     global_step = 0
     pipe.unet.train()
 
@@ -293,63 +310,18 @@ def train_lora_sdxl(
 
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-            # --- Text conditioning ---
-            # 6a) encoder_hidden_states for cross-attention
-            if prompt_embeds is not None:
-                encoder_hidden_states = prompt_embeds.repeat(latents.shape[0], 1, 1)
-            else:
-                # Fallback: simple tokenizer + text_encoder
-                try:
-                    if (
-                        hasattr(pipe, "tokenizer")
-                        and hasattr(pipe, "text_encoder")
-                        and pipe.tokenizer is not None
-                        and pipe.text_encoder is not None
-                    ):
-                        tokenized = pipe.tokenizer(
-                            batch["caption"],
-                            padding="max_length",
-                            truncation=True,
-                            max_length=pipe.tokenizer.model_max_length,
-                            return_tensors="pt",
-                        )
-                        input_ids = tokenized.input_ids.to(DEVICE)
-                        with torch.no_grad():
-                            encoder_hidden_states = pipe.text_encoder(input_ids)[0]
-                    else:
-                        raise ValueError("No valid text encoder/tokenizer available")
-                except Exception as te:
-                    print(f"[train] Text encoder fallback used due to: {te}")
-                    hidden_size = getattr(unet.config, "cross_attention_dim", 2048)
-                    encoder_hidden_states = torch.zeros(
-                        (latents.shape[0], 77, hidden_size),
-                        device=DEVICE,
-                        dtype=torch.float16,
-                    )
+            # Build encoder_hidden_states and added_cond_kwargs for SDXL
+            bsz = latents.shape[0]
+            encoder_hidden_states = prompt_embeds.repeat(bsz, 1, 1)
+            text_embeds = pooled_embeds.repeat(bsz, 1)
+            time_ids = add_time_ids.repeat(bsz, 1)
 
-            # 6b) added_cond_kwargs for SDXL (text_embeds + time_ids)
-            added_cond_kwargs = {}
-            if pooled_embeds is not None and hasattr(pipe, "_get_add_time_ids"):
-                try:
-                    add_time_ids = pipe._get_add_time_ids(
-                        (dataset.resolution, dataset.resolution),
-                        (0, 0),
-                        (dataset.resolution, dataset.resolution),
-                        dtype=pooled_embeds.dtype,
-                        device=DEVICE,
-                        batch_size=latents.shape[0],
-                    )
-                    add_text_embeds = pooled_embeds.repeat(latents.shape[0], 1)
-                    added_cond_kwargs["text_embeds"] = add_text_embeds
-                    added_cond_kwargs["time_ids"] = add_time_ids
-                except Exception as te:
-                    print(f"[train] _get_add_time_ids failed, continuing without extra cond: {te}")
-                    added_cond_kwargs = {}
-            else:
-                # No pooled_embeds helper → keep dict empty (diffusers will handle it)
-                added_cond_kwargs = {}
+            added_cond_kwargs = {
+                "text_embeds": text_embeds,
+                "time_ids": time_ids,
+            }
 
-            # 7) Forward UNet
+            # 8) Forward UNet with correct SDXL conditioning
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == "cuda")):
                 model_pred = unet(
                     noisy_latents,
@@ -374,7 +346,7 @@ def train_lora_sdxl(
 
     print("[train] Finished LoRA training, saving weights")
 
-    # 8) Save LoRA weights to a temp directory, then move to a single safetensors file
+    # 9) Save LoRA weights to a temp directory, then move to a single safetensors file
     tmp_out_dir = Path(f"/tmp/{avatar_id}_lora_out")
     if tmp_out_dir.exists():
         shutil.rmtree(tmp_out_dir)
