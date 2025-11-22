@@ -1,3 +1,5 @@
+import requests
+
 import os
 import io
 import base64
@@ -87,12 +89,33 @@ def handler(job):
     steps = int(data.get("steps", 30))
     cfg_scale = float(data.get("cfg_scale", 7.0))
     seed = data.get("seed", None)
+    lora_url = data.get("lora_url")  # URL to a .safetensors LoRA file (R2 later)
+
 
     generator = None
     if seed is not None:
         generator = torch.Generator(device=DEVICE).manual_seed(int(seed))
 
     pipe = load_pipeline()
+
+    # Optionally load a LoRA for avatar generation
+unload_after = False
+if lora_url:
+    try:
+        # Download LoRA file from URL to a temp path
+        resp = requests.get(lora_url)
+        resp.raise_for_status()
+        lora_path = "/tmp/avatar_lora.safetensors"
+        with open(lora_path, "wb") as f:
+            f.write(resp.content)
+
+        # Load LoRA weights into the pipeline
+        pipe.load_lora_weights(lora_path)
+        unload_after = True
+        print(f"[lora] Loaded LoRA from {lora_url}")
+    except Exception as e:
+        print(f"[lora] Failed to load LoRA from {lora_url}: {e}")
+
 
     with torch.autocast("cuda"):
         result = pipe(
@@ -116,6 +139,12 @@ def handler(job):
         }
         for i, img in enumerate(images)
     ]
+    
+    if unload_after:
+        try:
+            pipe.unload_lora_weights()
+        except Exception:
+            pass
 
     return {
         "status": "ok",
