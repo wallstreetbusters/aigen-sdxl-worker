@@ -1,5 +1,5 @@
 # GPU-ready PyTorch image from RunPod
-FROM runpod/pytorch:2.1.0-py310-cuda11.8.0-devel-ubuntu22.04
+FROM runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
 
 # Where our code lives inside the container
 WORKDIR /app
