@@ -50,7 +50,9 @@ def image_to_base64(img: Image.Image, fmt: str = "PNG") -> str:
 
 def handler(job):
     """
-    Expected job['input']:
+    job['input'] can be:
+
+    1) Generate:
     {
       "task": "generate",
       "engine": "sdxl",
@@ -62,12 +64,58 @@ def handler(job):
       "steps": 30,
       "cfg_scale": 7,
       "seed": 12345,
-      "lora_url": "https://..."  # optional
+      "lora_url": "https://..."   # optional
+    }
+
+    2) Train LoRA (stub for now):
+    {
+      "task": "train-lora",
+      "engine": "sdxl",
+      "user_id": "user_123",
+      "avatar_id": "avatar_abc",
+      "zip_url": "https://.../dataset.zip",
+      "trigger_word": "Sofia",
+      "steps": 2000,
+      "lora_upload_url": "https://.../PUT.safetensors",
+      "lora_public_url": "https://.../GET.safetensors"
     }
     """
     data = job.get("input", {}) or {}
-
     task = data.get("task", "generate")
+
+    # --------------------------
+    # TRAIN LORA (stub)
+    # --------------------------
+    if task == "train-lora":
+        user_id = data.get("user_id")
+        avatar_id = data.get("avatar_id")
+        zip_url = data.get("zip_url")
+        trigger_word = data.get("trigger_word")
+        steps = data.get("steps")
+        lora_upload_url = data.get("lora_upload_url")
+        lora_public_url = data.get("lora_public_url")
+
+        # For now we just echo back so we can test the wiring.
+        # Later we will actually:
+        #  - download zip_url
+        #  - train LoRA
+        #  - upload .safetensors to lora_upload_url
+        #  - return lora_public_url
+        return {
+            "status": "not_implemented_yet",
+            "engine": "sdxl",
+            "user_id": user_id,
+            "avatar_id": avatar_id,
+            "zip_url": zip_url,
+            "trigger_word": trigger_word,
+            "steps": steps,
+            "lora_upload_url": lora_upload_url,
+            "lora_public_url": lora_public_url,
+        }
+
+    # --------------------------
+    # GENERATE
+    # --------------------------
     if task != "generate":
         return {"error": f"Unsupported task: {task}"}
 
@@ -91,9 +139,7 @@ def handler(job):
 
     pipe = load_pipeline()
 
-    # --------------------------
     # Optional LoRA loading
-    # --------------------------
     unload_after = False
     if lora_url:
         try:
