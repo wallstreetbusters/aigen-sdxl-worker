@@ -90,6 +90,40 @@ def prepare_dataset(zip_url: str, avatar_id: str | None = None):
     return base_dir, image_files
 
 
+def create_dummy_lora(dataset_dir: Path, avatar_id: str | None = None) -> Path:
+    """
+    TEMP STEP: create a dummy .safetensors file to test the pipeline.
+    Later we will replace this with REAL LoRA training.
+    """
+    name = avatar_id or "avatar"
+    out_path = Path(f"/tmp/{name}_dummy_lora.safetensors")
+
+    print(f"[train] Creating dummy LoRA file at {out_path}")
+    # Just write some bytes so the file exists
+    with open(out_path, "wb") as f:
+        f.write(b"FAKE_LORA_DATA")
+
+    return out_path
+
+
+def upload_lora_file(local_path: Path, upload_url: str | None):
+    """
+    Upload a local LoRA file to the provided signed URL (if any).
+    """
+    if not upload_url:
+        print("[train] No lora_upload_url provided, skipping upload.")
+        return
+
+    if not local_path.exists():
+        raise FileNotFoundError(f"LoRA file not found at {local_path}")
+
+    print(f"[train] Uploading LoRA to {upload_url}")
+    with open(local_path, "rb") as f:
+        resp = requests.put(upload_url, data=f)
+        resp.raise_for_status()
+    print("[train] LoRA upload completed")
+
+
 # ------------------------------
 # RunPod handler
 # ------------------------------
@@ -113,7 +147,7 @@ def handler(job):
       "lora_url": "https://..."   # optional
     }
 
-    2) Train LoRA (dataset stage for now):
+    2) Train LoRA (dummy training for now):
     {
       "task": "train-lora",
       "engine": "sdxl",
@@ -130,7 +164,7 @@ def handler(job):
     task = data.get("task", "generate")
 
     # --------------------------
-    # TRAIN LORA (dataset stage)
+    # TRAIN LORA (dummy version)
     # --------------------------
     if task == "train-lora":
         user_id = data.get("user_id")
@@ -143,8 +177,19 @@ def handler(job):
 
         try:
             dataset_dir, image_files = prepare_dataset(zip_url, avatar_id)
+
+            # TEMP: create dummy LoRA file instead of real training
+            local_lora_path = create_dummy_lora(dataset_dir, avatar_id)
+
+            # TEMP: upload dummy LoRA (if URL provided)
+            try:
+                upload_lora_file(local_lora_path, lora_upload_url)
+                upload_status = "uploaded"
+            except Exception as up_err:
+                upload_status = f"upload_failed: {up_err}"
+
             return {
-                "status": "dataset_ready",
+                "status": "trained_stub",  # will change to 'done' when real training is in place
                 "engine": "sdxl",
                 "user_id": user_id,
                 "avatar_id": avatar_id,
@@ -155,11 +200,12 @@ def handler(job):
                 "lora_public_url": lora_public_url,
                 "dataset_dir": str(dataset_dir),
                 "num_images": len(image_files),
+                "local_lora_path": str(local_lora_path),
+                "upload_status": upload_status,
             }
         except Exception as e:
-            # If zip_url is fake (like example.com) or download fails, we land here
             return {
-                "status": "error_downloading_dataset",
+                "status": "error_training_stub",
                 "error_message": str(e),
                 "engine": "sdxl",
                 "user_id": user_id,
