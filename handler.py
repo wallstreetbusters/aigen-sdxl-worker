@@ -106,9 +106,12 @@ def create_dummy_lora(dataset_dir: Path, avatar_id: str | None = None) -> Path:
     return out_path
 
 
+LORA_API_KEY = os.getenv("LORA_UPLOAD_API_KEY", "")
+
 def upload_lora_file(local_path: Path, upload_url: str | None):
     """
-    Upload a local LoRA file to the provided signed URL (if any).
+    Upload a local LoRA file to the lora-uploader Worker.
+    We send x-api-key so the Worker can auth us.
     """
     if not upload_url:
         print("[train] No lora_upload_url provided, skipping upload.")
@@ -117,11 +120,16 @@ def upload_lora_file(local_path: Path, upload_url: str | None):
     if not local_path.exists():
         raise FileNotFoundError(f"LoRA file not found at {local_path}")
 
+    headers = {}
+    if LORA_API_KEY:
+        headers["x-api-key"] = LORA_API_KEY
+
     print(f"[train] Uploading LoRA to {upload_url}")
     with open(local_path, "rb") as f:
-        resp = requests.put(upload_url, data=f)
+        resp = requests.put(upload_url, data=f, headers=headers)
         resp.raise_for_status()
     print("[train] LoRA upload completed")
+
 
 
 # ------------------------------
