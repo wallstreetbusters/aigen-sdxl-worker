@@ -34,10 +34,9 @@ def load_pipeline():
 
     print(f"[init] Loading SDXL model: {MODEL_ID} on {DEVICE}")
     PIPELINE = StableDiffusionXLPipeline.from_pretrained(
-    MODEL_ID,
-    torch_dtype=torch.float32
+        MODEL_ID,
+        torch_dtype=torch.float32  # train & infer in fp32 to avoid NaNs
     ).to(DEVICE)
-
 
     try:
         PIPELINE.enable_xformers_memory_efficient_attention()
@@ -177,11 +176,6 @@ def map_ui_steps_to_train_steps(ui_steps: int, num_images: int) -> int:
     """
     Map frontend 'steps' (2000/3000/4000/5000) + image count (12–18)
     to a sane SDXL LoRA training step count.
-
-    Rough idea:
-      - Base ~100 steps per image (community practice: ~75–120× num_images)
-      - Higher UI steps => higher factor
-      - Clamp to a safe range for SDXL on serverless
     """
     # Safety: clamp num_images to a reasonable range
     num_images = max(1, min(int(num_images), 32))
@@ -201,7 +195,6 @@ def map_ui_steps_to_train_steps(ui_steps: int, num_images: int) -> int:
     effective = int(base * factor)
 
     # Final clamp to keep things reasonable for SDXL LoRA
-    # (roughly 600–2200 steps for 12–18 images)
     effective = max(600, min(effective, 2200))
 
     return effective
@@ -267,10 +260,8 @@ def train_lora_sdxl(
 
     # 4) Get text + pooled embeddings and time ids via SDXL helpers
     try:
-        # We do NOT want gradients through the text encoder for LoRA-on-UNet training,
-        # so we wrap encode_prompt + _get_add_time_ids in torch.no_grad().
+        # No gradients through text encoders
         with torch.no_grad():
-            # SDXL encode_prompt returns 4 values
             (
                 prompt_embeds,
                 _neg_prompt_embeds,
@@ -284,7 +275,6 @@ def train_lora_sdxl(
             )
             print("[train] Got prompt & pooled embeddings from encode_prompt")
 
-            # IMPORTANT: for SDXL we must pass text_encoder_projection_dim explicitly
             text_encoder_projection_dim = None
             if hasattr(pipe, "text_encoder_2") and hasattr(
                 pipe.text_encoder_2, "config"
@@ -315,11 +305,10 @@ def train_lora_sdxl(
             )
             print("[train] Got time ids from _get_add_time_ids")
 
-        # Make sure these are on the right device/dtype and detached (no grad graph)
-    prompt_embeds = prompt_embeds.to(DEVICE, dtype=torch.float32)
-    pooled_embeds = pooled_embeds.to(DEVICE, dtype=torch.float32)
-    add_time_ids = add_time_ids.to(DEVICE, dtype=torch.float32)
-
+        # Put conditioning tensors on device in float32
+        prompt_embeds = prompt_embeds.to(DEVICE, dtype=torch.float32)
+        pooled_embeds = pooled_embeds.to(DEVICE, dtype=torch.float32)
+        add_time_ids = add_time_ids.to(DEVICE, dtype=torch.float32)
 
     except Exception as e:
         print(f"[train] FATAL: encode_prompt/_get_add_time_ids failed: {e}")
@@ -371,17 +360,14 @@ def train_lora_sdxl(
 
             pixel_values = batch["pixel_values"].to(DEVICE, dtype=torch.float32)
 
-
-        
             # Encode images to latents
             with torch.no_grad():
                 latents = vae.encode(pixel_values).latent_dist.sample()
                 latents = latents * 0.18215
-                # ensure latents are float32 on the right device
                 latents = latents.to(DEVICE, dtype=torch.float32)
 
             # Sample noise and timesteps
-            noise = torch.randn_like(latents)  # same shape & dtype as latents
+            noise = torch.randn_like(latents)
             timesteps = torch.randint(
                 0,
                 noise_scheduler.config.num_train_timesteps,
@@ -440,14 +426,12 @@ def train_lora_sdxl(
             if global_step % 10 == 0:
                 print(f"[train] Step {global_step}/{steps} - loss: {loss.item():.4f}")
 
-
     # 9) Save LoRA weights to a temp directory, then move to a single safetensors file
     tmp_out_dir = Path(f"/tmp/{avatar_id}_lora_out")
     if tmp_out_dir.exists():
         shutil.rmtree(tmp_out_dir)
     tmp_out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Uses diffusers' built-in LoRA saving
     pipe.save_lora_weights(tmp_out_dir.as_posix(), adapter_name=adapter_name)
 
     # Look for a safetensors file
@@ -520,7 +504,6 @@ def handler(job):
         try:
             dataset_dir, image_files = prepare_dataset(zip_url, avatar_id)
 
-            # REAL SDXL LoRA training
             steps_int = int(steps) if steps is not None else 2000
             local_lora_path = train_lora_sdxl(
                 dataset_dir=dataset_dir,
