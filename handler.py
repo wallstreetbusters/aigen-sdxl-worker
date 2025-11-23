@@ -214,55 +214,65 @@ def train_lora_sdxl(
 
     height = width = dataset.resolution
 
+       # 4) Get text + pooled embeddings and time ids via SDXL helpers
     try:
-        # SDXL encode_prompt returns 4 values
-        (
-            prompt_embeds,
-            _neg_prompt_embeds,
-            pooled_embeds,
-            _neg_pooled,
-        ) = pipe.encode_prompt(
-            caption,
-            device=DEVICE,
-            num_images_per_prompt=1,
-            do_classifier_free_guidance=False,
-        )
-        print("[train] Got prompt & pooled embeddings from encode_prompt")
-
-        # IMPORTANT: for SDXL we must pass text_encoder_projection_dim explicitly,
-        # otherwise diffusers' _get_add_time_ids will try "int + None" and crash.
-        text_encoder_projection_dim = None
-        if hasattr(pipe, "text_encoder_2") and hasattr(
-            pipe.text_encoder_2, "config"
-        ):
-            text_encoder_projection_dim = getattr(
-                pipe.text_encoder_2.config, "projection_dim", None
+        # We do NOT want gradients through the text encoder for LoRA-on-UNet training,
+        # so we wrap encode_prompt + _get_add_time_ids in torch.no_grad().
+        with torch.no_grad():
+            # SDXL encode_prompt returns 4 values
+            (
+                prompt_embeds,
+                _neg_prompt_embeds,
+                pooled_embeds,
+                _neg_pooled,
+            ) = pipe.encode_prompt(
+                caption,
+                device=DEVICE,
+                num_images_per_prompt=1,
+                do_classifier_free_guidance=False,
             )
-        if text_encoder_projection_dim is None and hasattr(pipe, "text_encoder") and hasattr(
-            pipe.text_encoder, "config"
-        ):
-            # fallback, just in case
-            text_encoder_projection_dim = getattr(
-                pipe.text_encoder.config, "projection_dim", None
-            )
+            print("[train] Got prompt & pooled embeddings from encode_prompt")
 
-        if text_encoder_projection_dim is None:
-            raise RuntimeError(
-                "Could not determine text_encoder_projection_dim for SDXL."
-            )
+            # IMPORTANT: for SDXL we must pass text_encoder_projection_dim explicitly
+            text_encoder_projection_dim = None
+            if hasattr(pipe, "text_encoder_2") and hasattr(
+                pipe.text_encoder_2, "config"
+            ):
+                text_encoder_projection_dim = getattr(
+                    pipe.text_encoder_2.config, "projection_dim", None
+                )
+            if (
+                text_encoder_projection_dim is None
+                and hasattr(pipe, "text_encoder")
+                and hasattr(pipe.text_encoder, "config")
+            ):
+                text_encoder_projection_dim = getattr(
+                    pipe.text_encoder.config, "projection_dim", None
+                )
 
-        add_time_ids = pipe._get_add_time_ids(
-            (height, width),
-            (0, 0),
-            (height, width),
-            dtype=prompt_embeds.dtype,
-            text_encoder_projection_dim=text_encoder_projection_dim,
-        )
-        print("[train] Got time ids from _get_add_time_ids")
+            if text_encoder_projection_dim is None:
+                raise RuntimeError(
+                    "Could not determine text_encoder_projection_dim for SDXL."
+                )
+
+            add_time_ids = pipe._get_add_time_ids(
+                (height, width),
+                (0, 0),
+                (height, width),
+                dtype=prompt_embeds.dtype,
+                text_encoder_projection_dim=text_encoder_projection_dim,
+            )
+            print("[train] Got time ids from _get_add_time_ids")
+
+        # Make sure these are on the right device/dtype and detached (no grad graph)
+        prompt_embeds = prompt_embeds.to(DEVICE, dtype=torch.float16)
+        pooled_embeds = pooled_embeds.to(DEVICE, dtype=torch.float16)
+        add_time_ids = add_time_ids.to(DEVICE, dtype=torch.float16)
 
     except Exception as e:
         print(f"[train] FATAL: encode_prompt/_get_add_time_ids failed: {e}")
         raise
+
 
 
     prompt_embeds = prompt_embeds.to(DEVICE)
