@@ -34,9 +34,10 @@ def load_pipeline():
 
     print(f"[init] Loading SDXL model: {MODEL_ID} on {DEVICE}")
     PIPELINE = StableDiffusionXLPipeline.from_pretrained(
-        MODEL_ID,
-        torch_dtype=torch.float16,
+    MODEL_ID,
+    torch_dtype=torch.float32
     ).to(DEVICE)
+
 
     try:
         PIPELINE.enable_xformers_memory_efficient_attention()
@@ -315,9 +316,10 @@ def train_lora_sdxl(
             print("[train] Got time ids from _get_add_time_ids")
 
         # Make sure these are on the right device/dtype and detached (no grad graph)
-        prompt_embeds = prompt_embeds.to(DEVICE, dtype=torch.float16)
-        pooled_embeds = pooled_embeds.to(DEVICE, dtype=torch.float16)
-        add_time_ids = add_time_ids.to(DEVICE, dtype=torch.float16)
+    prompt_embeds = prompt_embeds.to(DEVICE, dtype=torch.float32)
+    pooled_embeds = pooled_embeds.to(DEVICE, dtype=torch.float32)
+    add_time_ids = add_time_ids.to(DEVICE, dtype=torch.float32)
+
 
     except Exception as e:
         print(f"[train] FATAL: encode_prompt/_get_add_time_ids failed: {e}")
@@ -367,15 +369,19 @@ def train_lora_sdxl(
             if global_step >= steps:
                 break
 
-            pixel_values = batch["pixel_values"].to(DEVICE, dtype=torch.float16)
+            pixel_values = batch["pixel_values"].to(DEVICE, dtype=torch.float32)
 
+
+        
             # Encode images to latents
             with torch.no_grad():
                 latents = vae.encode(pixel_values).latent_dist.sample()
                 latents = latents * 0.18215
+                # ensure latents are float32 on the right device
+                latents = latents.to(DEVICE, dtype=torch.float32)
 
             # Sample noise and timesteps
-            noise = torch.randn_like(latents)
+            noise = torch.randn_like(latents)  # same shape & dtype as latents
             timesteps = torch.randint(
                 0,
                 noise_scheduler.config.num_train_timesteps,
@@ -397,20 +403,15 @@ def train_lora_sdxl(
                 "time_ids": time_ids,
             }
 
-            # 8) Forward UNet with correct SDXL conditioning
-            with torch.autocast(
-                device_type="cuda",
-                dtype=torch.float16,
-                enabled=(DEVICE == "cuda"),
-            ):
-                model_pred = unet(
-                    noisy_latents,
-                    timesteps,
-                    encoder_hidden_states=encoder_hidden_states,
-                    added_cond_kwargs=added_cond_kwargs,
-                ).sample
+            # 8) Forward UNet with correct SDXL conditioning (fp32, no autocast)
+            model_pred = unet(
+                noisy_latents,
+                timesteps,
+                encoder_hidden_states=encoder_hidden_states,
+                added_cond_kwargs=added_cond_kwargs,
+            ).sample
 
-                loss = torch.nn.functional.mse_loss(model_pred, noise)
+            loss = torch.nn.functional.mse_loss(model_pred, noise)
 
             # Guard against NaN / Inf loss
             if not torch.isfinite(loss):
@@ -438,6 +439,7 @@ def train_lora_sdxl(
 
             if global_step % 10 == 0:
                 print(f"[train] Step {global_step}/{steps} - loss: {loss.item():.4f}")
+
 
     # 9) Save LoRA weights to a temp directory, then move to a single safetensors file
     tmp_out_dir = Path(f"/tmp/{avatar_id}_lora_out")
