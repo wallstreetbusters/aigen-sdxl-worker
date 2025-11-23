@@ -167,6 +167,39 @@ def upload_lora_file(local_path: Path, upload_url: str | None):
     print("[train] LoRA upload completed")
 
 
+    def map_ui_steps_to_train_steps(ui_steps: int, num_images: int) -> int:
+    """
+    Map frontend 'steps' (2000/3000/4000/5000) + image count (12–18)
+    to a sane SDXL LoRA training step count.
+
+    Rough idea:
+      - Base ~100 steps per image (community practice: ~75–120× num_images)
+      - Higher UI steps => higher factor
+      - Clamp to a safe range for SDXL on serverless
+    """
+    # Safety: clamp num_images to a reasonable range
+    num_images = max(1, min(int(num_images), 32))
+
+    base = num_images * 100  # 100 steps per image as baseline
+
+    # Map UI value to a quality factor
+    if ui_steps <= 2000:
+        factor = 0.8   # lower end of quality
+    elif ui_steps <= 3000:
+        factor = 1.0   # baseline
+    elif ui_steps <= 4000:
+        factor = 1.2   # a bit more training
+    else:  # 5000 or above
+        factor = 1.4   # highest quality preset
+
+    effective = int(base * factor)
+
+    # Final clamp to keep things reasonable for SDXL LoRA
+    # (roughly 600–2200 steps for 12–18 images)
+    effective = max(600, min(effective, 2200))
+
+    return effective
+
 # ------------------------------
 # REAL SDXL LoRA TRAINING
 # ------------------------------
@@ -180,14 +213,26 @@ def train_lora_sdxl(
 ) -> Path:
     """
     Simplified SDXL LoRA training loop using pipeline helpers.
-
-    - Uses SDXL base model from MODEL_ID.
-    - Adds LoRA adapters to the UNet.
-    - Trains LoRA weights for `steps` iterations (batch size 1).
-    - Saves a safetensors LoRA file in /tmp and returns its path.
     """
     if not image_files:
-        raise ValueError("No images found in dataset for LoRA training")
+        raise ValueError("No images found for training.")
+
+    # --- Map UI steps (2000/3000/4000/5000) -> real training steps ---
+    try:
+        ui_steps = int(steps) if steps is not None else 2000
+    except Exception:
+        ui_steps = 2000
+
+    num_images = len(image_files)
+    effective_steps = map_ui_steps_to_train_steps(ui_steps, num_images)
+
+    print(
+        f"[train] avatar_id={avatar_id} num_images={num_images} "
+        f"ui_steps={ui_steps} -> effective_steps={effective_steps}"
+    )
+
+    steps = effective_steps  # from here on, training uses this value
+
 
     # 1) Build caption
     if trigger_word:
@@ -309,7 +354,7 @@ def train_lora_sdxl(
     lora_params = [p for p in unet.parameters() if p.requires_grad]
     print(f"[train] Number of trainable LoRA params: {sum(p.numel() for p in lora_params)}")
 
-    optimizer = torch.optim.AdamW(lora_params, lr=1e-4)
+    optimizer = torch.optim.AdamW(lora_params, lr=1e-5)
 
     # 7) Training loop
     global_step = 0
@@ -354,29 +399,39 @@ def train_lora_sdxl(
             }
 
             # 8) Forward UNet with correct SDXL conditioning
-            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == "cuda")):
-                model_pred = unet(
-                    noisy_latents,
-                    timesteps,
-                    encoder_hidden_states=encoder_hidden_states,
-                    added_cond_kwargs=added_cond_kwargs,
-                ).sample
+with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == "cuda")):
+    model_pred = unet(
+        noisy_latents,
+        timesteps,
+        encoder_hidden_states=encoder_hidden_states,
+        added_cond_kwargs=added_cond_kwargs,
+    ).sample
 
-                loss = torch.nn.functional.mse_loss(model_pred, noise)
+    loss = torch.nn.functional.mse_loss(model_pred, noise)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+# Guard against NaN / Inf loss
+if not torch.isfinite(loss):
+    print(f"[train] WARNING: non-finite loss at step {global_step}: {loss.item()}")
+    global_step += 1
+    if global_step % 10 == 0:
+        print(f"[train] Step {global_step}/{steps} - loss is non-finite, skipping")
+    if global_step >= steps:
+        break
+    continue
 
-            global_step += 1
+optimizer.zero_grad()
+loss.backward()
 
-            if global_step % 10 == 0:
-                print(f"[train] Step {global_step}/{steps} - loss: {loss.item():.4f}")
+# Gradient clipping to avoid exploding grads
+torch.nn.utils.clip_grad_norm_(lora_params, max_norm=1.0)
 
-            if global_step >= steps:
-                break
+optimizer.step()
 
-    print("[train] Finished LoRA training, saving weights")
+global_step += 1
+
+if global_step % 10 == 0:
+    print(f"[train] Step {global_step}/{steps} - loss: {loss.item():.4f}")
+
 
     # 9) Save LoRA weights to a temp directory, then move to a single safetensors file
     tmp_out_dir = Path(f"/tmp/{avatar_id}_lora_out")
