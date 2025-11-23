@@ -5,7 +5,7 @@ import zipfile
 import shutil
 from pathlib import Path
 from typing import List
-import traceback  # for logging errors
+import traceback
 
 import numpy as np
 import requests
@@ -35,7 +35,7 @@ def load_pipeline():
     print(f"[init] Loading SDXL model: {MODEL_ID} on {DEVICE}")
     PIPELINE = StableDiffusionXLPipeline.from_pretrained(
         MODEL_ID,
-        torch_dtype=torch.float16
+        torch_dtype=torch.float16,
     ).to(DEVICE)
 
     try:
@@ -62,6 +62,7 @@ class AvatarDataset(Dataset):
     - image_files: list of Paths
     - caption: single caption for all images (e.g. "a photo of Sofia")
     """
+
     def __init__(self, image_files: List[Path], caption: str, resolution: int = 768):
         self.image_files = image_files
         self.caption = caption
@@ -167,7 +168,11 @@ def upload_lora_file(local_path: Path, upload_url: str | None):
     print("[train] LoRA upload completed")
 
 
-    def map_ui_steps_to_train_steps(ui_steps: int, num_images: int) -> int:
+# ------------------------------
+# UI steps -> real train steps mapping
+# ------------------------------
+
+def map_ui_steps_to_train_steps(ui_steps: int, num_images: int) -> int:
     """
     Map frontend 'steps' (2000/3000/4000/5000) + image count (12–18)
     to a sane SDXL LoRA training step count.
@@ -199,6 +204,7 @@ def upload_lora_file(local_path: Path, upload_url: str | None):
     effective = max(600, min(effective, 2200))
 
     return effective
+
 
 # ------------------------------
 # REAL SDXL LoRA TRAINING
@@ -233,7 +239,6 @@ def train_lora_sdxl(
 
     steps = effective_steps  # from here on, training uses this value
 
-
     # 1) Build caption
     if trigger_word:
         caption = f"a photo of {trigger_word}"
@@ -259,7 +264,7 @@ def train_lora_sdxl(
 
     height = width = dataset.resolution
 
-       # 4) Get text + pooled embeddings and time ids via SDXL helpers
+    # 4) Get text + pooled embeddings and time ids via SDXL helpers
     try:
         # We do NOT want gradients through the text encoder for LoRA-on-UNet training,
         # so we wrap encode_prompt + _get_add_time_ids in torch.no_grad().
@@ -318,12 +323,6 @@ def train_lora_sdxl(
         print(f"[train] FATAL: encode_prompt/_get_add_time_ids failed: {e}")
         raise
 
-
-
-    prompt_embeds = prompt_embeds.to(DEVICE)
-    pooled_embeds = pooled_embeds.to(DEVICE)
-    add_time_ids = add_time_ids.to(DEVICE)
-
     # 5) Freeze everything except LoRA params
     unet.requires_grad_(False)
     vae.requires_grad_(False)
@@ -358,7 +357,7 @@ def train_lora_sdxl(
 
     # 7) Training loop
     global_step = 0
-    pipe.unet.train()
+    unet.train()
 
     noise_scheduler = scheduler
 
@@ -399,39 +398,46 @@ def train_lora_sdxl(
             }
 
             # 8) Forward UNet with correct SDXL conditioning
-with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == "cuda")):
-    model_pred = unet(
-        noisy_latents,
-        timesteps,
-        encoder_hidden_states=encoder_hidden_states,
-        added_cond_kwargs=added_cond_kwargs,
-    ).sample
+            with torch.autocast(
+                device_type="cuda",
+                dtype=torch.float16,
+                enabled=(DEVICE == "cuda"),
+            ):
+                model_pred = unet(
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states=encoder_hidden_states,
+                    added_cond_kwargs=added_cond_kwargs,
+                ).sample
 
-    loss = torch.nn.functional.mse_loss(model_pred, noise)
+                loss = torch.nn.functional.mse_loss(model_pred, noise)
 
-# Guard against NaN / Inf loss
-if not torch.isfinite(loss):
-    print(f"[train] WARNING: non-finite loss at step {global_step}: {loss.item()}")
-    global_step += 1
-    if global_step % 10 == 0:
-        print(f"[train] Step {global_step}/{steps} - loss is non-finite, skipping")
-    if global_step >= steps:
-        break
-    continue
+            # Guard against NaN / Inf loss
+            if not torch.isfinite(loss):
+                print(
+                    f"[train] WARNING: non-finite loss at step {global_step}: {loss.item()}"
+                )
+                global_step += 1
+                if global_step % 10 == 0:
+                    print(
+                        f"[train] Step {global_step}/{steps} - loss is non-finite, skipping"
+                    )
+                if global_step >= steps:
+                    break
+                continue
 
-optimizer.zero_grad()
-loss.backward()
+            optimizer.zero_grad()
+            loss.backward()
 
-# Gradient clipping to avoid exploding grads
-torch.nn.utils.clip_grad_norm_(lora_params, max_norm=1.0)
+            # Gradient clipping to avoid exploding grads
+            torch.nn.utils.clip_grad_norm_(lora_params, max_norm=1.0)
 
-optimizer.step()
+            optimizer.step()
 
-global_step += 1
+            global_step += 1
 
-if global_step % 10 == 0:
-    print(f"[train] Step {global_step}/{steps} - loss: {loss.item():.4f}")
-
+            if global_step % 10 == 0:
+                print(f"[train] Step {global_step}/{steps} - loss: {loss.item():.4f}")
 
     # 9) Save LoRA weights to a temp directory, then move to a single safetensors file
     tmp_out_dir = Path(f"/tmp/{avatar_id}_lora_out")
@@ -513,7 +519,7 @@ def handler(job):
             dataset_dir, image_files = prepare_dataset(zip_url, avatar_id)
 
             # REAL SDXL LoRA training
-            steps_int = int(steps) if steps is not None else 800
+            steps_int = int(steps) if steps is not None else 2000
             local_lora_path = train_lora_sdxl(
                 dataset_dir=dataset_dir,
                 image_files=image_files,
@@ -563,7 +569,7 @@ def handler(job):
         prompt = data.get("prompt", "a photo of a woman, studio portrait, 4k")
         negative_prompt = data.get(
             "negative_prompt",
-            "extra limbs, extra fingers, bad anatomy, deformed, blurry, low quality"
+            "extra limbs, extra fingers, bad anatomy, deformed, blurry, low quality",
         )
 
         num_outputs = int(data.get("num_outputs", 1))
@@ -596,7 +602,11 @@ def handler(job):
             except Exception as e:
                 print(f"[lora] Failed to load LoRA from {lora_url}: {e}")
 
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=(DEVICE == "cuda")):
+        with torch.autocast(
+            device_type="cuda",
+            dtype=torch.float16,
+            enabled=(DEVICE == "cuda"),
+        ):
             result = pipe(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
